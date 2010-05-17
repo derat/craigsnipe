@@ -1,7 +1,7 @@
-#!/usr/bin/python2.4
-# Some versions of feedparser have a bug that makes it throw
-# UnicodeDecodeError exceptions when run under Python 2.5, so I'm using 2.4
-# for now.
+#!/usr/bin/python
+# Copyright (c) 2010 Daniel Erat.  All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
 
 import calendar
 import feedparser
@@ -9,17 +9,26 @@ import os
 import re
 import sys
 import time
+
 from email.Generator import Generator
 from optparse import OptionParser
 from pysqlite2 import dbapi2 as sqlite
 
+# Here is the database schema.  To initialize your database, run
+# "sqlite3 /path/to/database.db" and then execute these queries.
+#
+# Note that no tool exists for configuring the program -- you'll
+# need to manually run INSERT queries to:
+# - insert rows into Feeds for the RSS feeds that you want to follow
+# - insert rows into Subscriptions to map those feeds to email recipients
+# - insert any filters desired to exclude posts
 '''
 CREATE TABLE Feeds (
   FeedId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-  Url VARCHAR(256) UNIQUE NOT NULL,
-  ShortName VARCHAR(256),
-  Description VARCHAR(256),
-  LastFetched INTEGER
+  Url VARCHAR(256) UNIQUE NOT NULL,  -- URL of RSS feed
+  ShortName VARCHAR(256),            -- optional; used in email subject
+  Description VARCHAR(256),          -- optional; just to make DB more readable
+  LastFetched INTEGER                -- just use the default here
 );
 
 CREATE TABLE FeedItems (
@@ -30,23 +39,24 @@ CREATE TABLE FeedItems (
 );
 
 CREATE TABLE Subscriptions (
-  FeedId INTEGER,
-  Email VARCHAR(256) NOT NULL,
-  Active BOOLEAN,
+  FeedId INTEGER,               -- refers to a row in the Feeds table
+  Email VARCHAR(256) NOT NULL,  -- recipient email address
+  Active BOOLEAN,               -- can be used to temporarily disable
   PRIMARY KEY (FeedId, Email)
 );
 
 CREATE TABLE Filters (
   FeedId INTEGER,
-  RegExp VARCHAR(256) NOT NULL,
+  RegExp VARCHAR(256) NOT NULL,  -- we'll ignore items matching this regexp
   PRIMARY KEY (FeedId, RegExp)
 );
 '''
 
 class CraigSniper:
-    def __init__(self, db_filename, sendmail='/usr/lib/sendmail -t',
-                 verbose=False):
+    def __init__(self, db_filename, from_address,
+                 sendmail='/usr/lib/sendmail -t', verbose=False):
         self._db = sqlite.connect(db_filename)
+        self._from_address = from_address
         self._sendmail = sendmail
         self._verbose = verbose
 
@@ -85,7 +95,7 @@ class CraigSniper:
         if short_name: subject_header = '[%s] ' % short_name
 
         message = '''\
-From: craigsnipe@erat.org
+From: %s
 To: !to!
 Subject: %s%s
 Content-Type: text/html
@@ -96,7 +106,8 @@ Content-Type: text/html
 
 <p>This item was posted at %s.<br/>
 View the original at <a href="%s">%s</a>.''' % \
-            (subject_header,
+            (self._from_address,
+             subject_header,
              item.title.replace('&amp;', '&').encode('ascii', 'replace'),
              item.description.encode('ascii', 'replace'),
              time.ctime(calendar.timegm(item.date_parsed)),
@@ -112,7 +123,7 @@ View the original at <a href="%s">%s</a>.''' % \
             p.write(message)
             code = p.close()
             if code:
-                print '%s exited with ' + code
+                print '"%s" exited with %d' % (self._sendmail, code)
 
     def __vlog(self, msg):
         if self._verbose:
@@ -165,7 +176,7 @@ def main():
     parser.add_option('-d', '--db', help='sqlite3 database file',
                       default='data/craigsnipe.db', metavar='PATH', dest='db')
     parser.add_option('-f', '--from', help='Source email address',
-                      default=None, action='store_true', dest='from_address')
+                      default=None, dest='from_address')
     parser.add_option('-n', '--dry-run', help='Dry-run mode: '
                       'don\'t send email or update the DB, and process items '
                       'that have already been seen', default=False,
@@ -177,9 +188,13 @@ def main():
     (options, args) = parser.parse_args()
 
     if not os.path.exists(options.db):
-        sys.stderr.write('Database %s not found' % options.db)
+        sys.stderr.write('Database %s not found\n' % options.db)
+        sys.exit(1)
+    if not options.from_address:
+        sys.stderr.write('From-address must be supplied with -f\n')
         sys.exit(1)
     craig = CraigSniper(options.db,
+                        options.from_address,
                         sendmail=options.sendmail,
                         verbose=options.verbose)
     craig.process_feeds(options.dry_run)
